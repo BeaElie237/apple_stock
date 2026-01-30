@@ -1,32 +1,12 @@
-FROM python:3.9-slim
-
-WORKDIR /app
-
-# Installer les dépendances système
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copier les fichiers
-COPY requirements.txt .
-COPY src/ ./src/
-COPY config/ ./config/
-COPY storage/ ./storage/
-
-# Installer les dépendances Python
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Créer les dossiers nécessaires
-RUN mkdir -p storage/data storage/models storage/predictions
-
-# Variables d'environnement
-ENV PYTHONPATH=/app
-ENV STREAMLIT_SERVER_PORT=7860
-ENV STREAMLIT_SERVER_HEADLESS=true
-
-# Exposer le port
-EXPOSE 7860
-
-# Commande de démarrage
-CMD ["streamlit", "run", "src/app.py", "--server.port=7860", "--server.address=0.0.0.0"]
+numpy>=1.23
+pandas>=1.5
+scikit-learn>=1.2
+matplotlib>=3.7
+yfinance>=0.2
+tensorflow>=2.12
+streamlit>=1.28
+<<<<<<< HEAD
+Pillow>=9.5
+=======
+Pillow>=9.5
+>>>>>>> a1f63650bf4a30e38787fd1e6547180806a83b45
