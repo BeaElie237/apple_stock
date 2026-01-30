@@ -1,645 +1,193 @@
-name: 🍏 Apple Stock Predictor - Full Pipeline
+name: Apple Stock ML Pipeline
 
 on:
-  # 1. Déclenchement manuel depuis GitHub
-  workflow_dispatch:
-    inputs:
-      action:
-        description: 'Action à exécuter'
-        required: true
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - collect
-          - train
-          - predict
-          - deploy
-  
-  # 2. Déclenchement automatique selon planning
-  schedule:
-    - cron: '0 18 * * 1-5'    # Collecte quotidienne (Lun-Ven 18h)
-    - cron: '0 2 * * 1'       # Entraînement hebdo (Lundi 2h)
-    - cron: '30 19 * * 1-5'   # Prédiction quotidienne (Lun-Ven 19h30)
-  
-  # 3. Déclenchement au push sur la branche principale
   push:
-    branches: [ master ]  # Changez en [ main ] si nécessaire
+    branches: [ "main" ]
+  workflow_dispatch:
+  schedule:
+    # Exécution automatique chaque lundi à 06h
+    - cron: "0 6 * * 1"
 
-# Variables globales
 env:
-  TICKER: AAPL
-  PREDICTION_DAYS: 21
-  LOOK_BACK: 60
-  MODEL_TYPES: "cnn,gru"
+  PYTHON_VERSION: "3.10"
+  HF_SPACE_NAME: "apple-stock-predictor"
+  HF_USERNAME: ${{ secrets.HF_USERNAME }}
 
 jobs:
-  # ======================
-  # ÉTAPE 1 : SETUP
-  # ======================
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      should_run_collect: ${{ steps.check.outputs.should_run_collect }}
-      should_run_train: ${{ steps.check.outputs.should_run_train }}
-      should_run_predict: ${{ steps.check.outputs.should_run_predict }}
-      should_run_deploy: ${{ steps.check.outputs.should_run_deploy }}
-    
-    steps:
-    - name: 🔍 Déterminer quelle étape exécuter
-      id: check
-      run: |
-        echo "Événement déclencheur: ${{ github.event_name }}"
-        
-        # Par défaut, tout à false
-        COLLECT="false"
-        TRAIN="false"
-        PREDICT="false"
-        DEPLOY="false"
-        
-        # Selon le type d'événement
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-          ACTION="${{ github.event.inputs.action }}"
-          echo "Action manuelle: $ACTION"
-          
-          if [[ "$ACTION" == "all" || "$ACTION" == "collect" ]]; then COLLECT="true"; fi
-          if [[ "$ACTION" == "all" || "$ACTION" == "train" ]]; then TRAIN="true"; fi
-          if [[ "$ACTION" == "all" || "$ACTION" == "predict" ]]; then PREDICT="true"; fi
-          if [[ "$ACTION" == "all" || "$ACTION" == "deploy" ]]; then DEPLOY="true"; fi
-          
-        elif [[ "${{ github.event_name }}" == "schedule" ]]; then
-          CRON="${{ github.event.schedule }}"
-          echo "Schedule: $CRON"
-          
-          if [[ "$CRON" == "0 18 * * 1-5" ]]; then COLLECT="true"; fi
-          if [[ "$CRON" == "0 2 * * 1" ]]; then TRAIN="true"; PREDICT="true"; fi
-          if [[ "$CRON" == "30 19 * * 1-5" ]]; then PREDICT="true"; fi
-          
-        elif [[ "${{ github.event_name }}" == "push" ]]; then
-          echo "Push sur la branche, déploiement uniquement"
-          DEPLOY="true"
-        fi
-        
-        echo "should_run_collect=$COLLECT" >> $GITHUB_OUTPUT
-        echo "should_run_train=$TRAIN" >> $GITHUB_OUTPUT
-        echo "should_run_predict=$PREDICT" >> $GITHUB_OUTPUT
-        echo "should_run_deploy=$DEPLOY" >> $GITHUB_OUTPUT
-        
-        echo "📋 Plan d'exécution:"
-        echo "  Collecte: $COLLECT"
-        echo "  Entraînement: $TRAIN"
-        echo "  Prédiction: $PREDICT"
-        echo "  Déploiement: $DEPLOY"
 
-  # ======================
-  # ÉTAPE 2 : COLLECTE DES DONNÉES
-  # ======================
-  collect-data:
-    needs: setup
-    if: needs.setup.outputs.should_run_collect == 'true'
+# ==========================
+# 1️⃣ COLLECTE DES DONNÉES
+# ==========================
+  data_collection:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: 📥 Checkout du code
-      uses: actions/checkout@v3
-    
-    - name: 🐍 Setup Python
-      uses: actions/setup-python@v3
-      with:
-        python-version: '3.9'
-    
-    - name: 📦 Installer les dépendances
-      run: |
-        pip install -r requirements.txt
-        pip install yfinance pandas numpy scikit-learn
-    
-    - name: 📊 Collecter les données Apple
-      run: |
-        echo "Collecte des données $TICKER..."
-        python -c "
-        import yfinance as yf
-        import pandas as pd
-        from datetime import datetime
-        import os
-        
-        os.makedirs('storage/data', exist_ok=True)
-        
-        # Télécharger 4 ans de données
-        data = yf.download('${{ env.TICKER }}', period='4y')
-        
-        if data.empty:
-            raise ValueError('Aucune donnée téléchargée')
-        
-        # Sauvegarder
-        filename = f'storage/data/{ '${{ env.TICKER }}' }_{datetime.now().strftime("%Y%m%d")}.csv'
-        data.to_csv(filename)
-        print(f'✅ Données sauvegardées: {filename} ({len(data)} lignes)')
-        "
-    
-    - name: 🧹 Prétraiter les données
-      run: |
-        echo "Prétraitement des données..."
-        python -c "
-        import pandas as pd
-        import numpy as np
-        from sklearn.preprocessing import MinMaxScaler
-        import joblib
-        import glob
-        
-        # Trouver le dernier fichier
-        files = glob.glob('storage/data/*.csv')
-        if not files:
-            raise FileNotFoundError('Aucune donnée à prétraiter')
-        
-        latest_file = max(files)
-        data = pd.read_csv(latest_file, index_col=0, parse_dates=True)
-        
-        # Utiliser seulement Close
-        df = data[['Close']].copy()
-        
-        # Normalisation
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        df_scaled = scaler.fit_transform(df)
-        
-        # Créer séquences
-        look_back = ${{ env.LOOK_BACK }}
-        X, y = [], []
-        for i in range(look_back, len(df_scaled)):
-            X.append(df_scaled[i-look_back:i, 0])
-            y.append(df_scaled[i, 0])
-        
-        X, y = np.array(X), np.array(y)
-        X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-        
-        # Split train/test
-        split = int(0.8 * len(X))
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
-        
-        # Sauvegarder
-        np.savez_compressed('storage/data/processed.npz',
-                          X_train=X_train, y_train=y_train,
-                          X_test=X_test, y_test=y_test,
-                          df_scaled=df_scaled)
-        
-        joblib.dump(scaler, 'storage/data/scaler.joblib')
-        
-        print(f'✅ Données prétraitées:')
-        print(f'   X_train: {X_train.shape}')
-        print(f'   X_test: {X_test.shape}')
-        "
-    
-    - name: 💾 Sauvegarder les artefacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: apple-data
-        path: |
-          storage/data/*.csv
-          storage/data/*.npz
-          storage/data/*.joblib
-        retention-days: 7
-    
-    - name: ✅ Notification succès
-      if: success()
-      run: echo "✅ Collecte des données terminée avec succès!"
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  # ======================
-  # ÉTAPE 3 : ENTRÂINEMENT DES MODÈLES
-  # ======================
-  train-models:
-    needs: 
-      - setup
-      - collect-data
-    if: needs.setup.outputs.should_run_train == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        model_type: ['cnn', 'gru']
-    
-    steps:
-    - name: 📥 Checkout du code
-      uses: actions/checkout@v3
-    
-    - name: 🐍 Setup Python
-      uses: actions/setup-python@v3
-      with:
-        python-version: '3.9'
-    
-    - name: 📦 Installer TensorFlow et dépendances
-      run: |
-        pip install -r requirements.txt
-        pip install tensorflow
-        pip install matplotlib
-    
-    - name: 📊 Télécharger les données prétraitées
-      uses: actions/download-artifact@v3
-      with:
-        name: apple-data
-        path: storage/data/
-    
-    - name: 🏋️ Entraîner le modèle ${{ matrix.model_type }}
-      run: |
-        echo "Entraînement du modèle ${{ matrix.model_type }}..."
-        
-        if [[ "${{ matrix.model_type }}" == "cnn" ]]; then
-          python -c "
-          import tensorflow as tf
-          import numpy as np
-          from tensorflow.keras.models import Sequential
-          from tensorflow.keras.layers import Dense, Conv1D, MaxPooling1D, Flatten, Dropout
-          from tensorflow.keras.callbacks import EarlyStopping
-          
-          # Charger données
-          data = np.load('storage/data/processed.npz')
-          X_train, y_train = data['X_train'], data['y_train']
-          X_test, y_test = data['X_test'], data['y_test']
-          
-          # Construire modèle CNN
-          model = Sequential([
-              Conv1D(filters=64, kernel_size=3, activation='relu', 
-                    input_shape=(X_train.shape[1], 1)),
-              MaxPooling1D(pool_size=2),
-              Dropout(0.2),
-              Conv1D(filters=128, kernel_size=3, activation='relu'),
-              MaxPooling1D(pool_size=2),
-              Dropout(0.2),
-              Flatten(),
-              Dense(50, activation='relu'),
-              Dense(1)
-          ])
-          
-          model.compile(optimizer='adam', loss='mse')
-          
-          # Entraînement
-          history = model.fit(
-              X_train, y_train,
-              validation_data=(X_test, y_test),
-              epochs=50,
-              batch_size=32,
-              callbacks=[EarlyStopping(patience=10)],
-              verbose=0
-          )
-          
-          # Sauvegarder
-          model.save(f'storage/models/cnn_model.h5')
-          
-          print(f'✅ CNN entraîné:')
-          print(f'   Final loss: {history.history[\"loss\"][-1]:.4f}')
-          print(f'   Final val_loss: {history.history[\"val_loss\"][-1]:.4f}')
-          "
-        
-        else  # GRU
-          python -c "
-          import tensorflow as tf
-          import numpy as np
-          from tensorflow.keras.models import Sequential
-          from tensorflow.keras.layers import Dense, GRU, Dropout
-          from tensorflow.keras.callbacks import EarlyStopping
-          
-          # Charger données
-          data = np.load('storage/data/processed.npz')
-          X_train, y_train = data['X_train'], data['y_train']
-          X_test, y_test = data['X_test'], data['y_test']
-          
-          # Construire modèle GRU
-          model = Sequential([
-              GRU(units=50, return_sequences=True, input_shape=(X_train.shape[1], 1)),
-              Dropout(0.2),
-              GRU(units=50),
-              Dropout(0.2),
-              Dense(1)
-          ])
-          
-          model.compile(optimizer='adam', loss='mse')
-          
-          # Entraînement
-          history = model.fit(
-              X_train, y_train,
-              validation_data=(X_test, y_test),
-              epochs=50,
-              batch_size=32,
-              callbacks=[EarlyStopping(patience=10)],
-              verbose=0
-          )
-          
-          # Sauvegarder
-          model.save(f'storage/models/gru_model.h5')
-          
-          print(f'✅ GRU entraîné:')
-          print(f'   Final loss: {history.history[\"loss\"][-1]:.4f}')
-          print(f'   Final val_loss: {history.history[\"val_loss\"][-1]:.4f}')
-          "
-    
-    - name: 📈 Générer graphique d'entraînement
-      run: |
-        python -c "
-        import matplotlib.pyplot as plt
-        import numpy as np
-        
-        # Simuler un graphique (dans la vraie vie, utiliser l'historique)
-        epochs = range(1, 51)
-        train_loss = [0.1 * (0.95 ** i) for i in epochs]
-        val_loss = [0.12 * (0.96 ** i) for i in epochs]
-        
-        plt.figure(figsize=(10, 6))
-        plt.plot(epochs, train_loss, 'b-', label='Train loss', linewidth=2)
-        plt.plot(epochs, val_loss, 'r-', label='Validation loss', linewidth=2)
-        plt.title('Training History - ${{ matrix.model_type }}')
-        plt.xlabel('Epochs')
-        plt.ylabel('Loss (MSE)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.savefig('storage/models/training_${{ matrix.model_type }}.png', dpi=100)
-        print('✅ Graphique généré')
-        "
-    
-    - name: 💾 Sauvegarder le modèle
-      uses: actions/upload-artifact@v3
-      with:
-        name: ${{ matrix.model_type }}-model
-        path: |
-          storage/models/${{ matrix.model_type }}_model.h5
-          storage/models/training_${{ matrix.model_type }}.png
-        retention-days: 30
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-  # ======================
-  # ÉTAPE 4 : PRÉDICTIONS
-  # ======================
-  make-predictions:
-    needs: 
-      - setup
-      - train-models
-    if: needs.setup.outputs.should_run_predict == 'true'
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: 📥 Checkout du code
-      uses: actions/checkout@v3
-    
-    - name: 🐍 Setup Python
-      uses: actions/setup-python@v3
-      with:
-        python-version: '3.9'
-    
-    - name: 📦 Installer dépendances
-      run: pip install -r requirements.txt
-    
-    - name: 📊 Télécharger modèles et données
-      uses: actions/download-artifact@v3
-      with:
-        name: cnn-model
-        path: storage/models/
-    
-    - name: 🔮 Faire des prédictions
-      run: |
-        echo "Prédictions sur ${{ env.PREDICTION_DAYS }} jours..."
-        
-        python -c "
-        import tensorflow as tf
-        import numpy as np
-        import joblib
-        from datetime import datetime, timedelta
-        import json
-        
-        # Charger modèle et scaler
-        model = tf.keras.models.load_model('storage/models/cnn_model.h5')
-        scaler = joblib.load('storage/data/scaler.joblib')
-        data = np.load('storage/data/processed.npz')
-        
-        # Dernière séquence
-        df_scaled = data['df_scaled']
-        look_back = ${{ env.LOOK_BACK }}
-        last_sequence = df_scaled[-look_back:, 0]
-        
-        # Prédictions futures
-        days_to_predict = ${{ env.PREDICTION_DAYS }}
-        predictions = []
-        current_seq = last_sequence.copy()
-        
-        for i in range(days_to_predict):
-            pred = model.predict(current_seq.reshape(1, -1, 1), verbose=0)[0, 0]
-            predictions.append(pred)
-            current_seq = np.roll(current_seq, -1)
-            current_seq[-1] = pred
-        
-        # Convertir en prix réels
-        predictions = np.array(predictions).reshape(-1, 1)
-        predictions = scaler.inverse_transform(predictions).flatten()
-        
-        # Générer dates
-        start_date = datetime.now()
-        dates = [(start_date + timedelta(days=i+1)).strftime('%Y-%m-%d') 
-                for i in range(days_to_predict)]
-        
-        # Sauvegarder
-        result = {
-            'prediction_date': datetime.now().isoformat(),
-            'model': 'cnn',
-            'predictions': predictions.tolist(),
-            'prediction_dates': dates,
-            'first_price': float(predictions[0]),
-            'last_price': float(predictions[-1]),
-            'total_change_percent': float((predictions[-1] - predictions[0]) / predictions[0] * 100)
-        }
-        
-        with open('storage/predictions/latest.json', 'w') as f:
-            json.dump(result, f, indent=2)
-        
-        print(f'✅ Prédictions terminées:')
-        print(f'   Premier jour: ${result[\"first_price\"]:.2f}')
-        print(f'   Dernier jour: ${result[\"last_price\"]:.2f}')
-        print(f'   Variation: {result[\"total_change_percent\"]:.2f}%')
-        "
-    
-    - name: 📊 Analyser opportunités
-      run: |
-        python -c "
-        import json
-        
-        with open('storage/predictions/latest.json', 'r') as f:
-            pred = json.load(f)
-        
-        change = pred['total_change_percent']
-        
-        if change > 5:
-            recommendation = '🚀 ACHAT FORT'
-            opportunity = 'true'
-        elif change > 2:
-            recommendation = '📈 ACHAT MODÉRÉ'
-            opportunity = 'true'
-        elif change < -3:
-            recommendation = '⚠️ VENTE'
-            opportunity = 'true'
-        else:
-            recommendation = '📊 MAINTIEN'
-            opportunity = 'false'
-        
-        analysis = {
-            'analysis_date': pred['prediction_date'],
-            'recommendation': recommendation,
-            'confidence': min(0.95, 0.5 + abs(change) / 20),
-            'opportunity_detected': opportunity == 'true',
-            'details': pred
-        }
-        
-        with open('storage/predictions/analysis.json', 'w') as f:
-            json.dump(analysis, f, indent=2)
-        
-        with open('opportunity.txt', 'w') as f:
-            f.write(opportunity)
-        
-        print(f'📋 Analyse: {recommendation}')
-        print(f'   Confiance: {analysis[\"confidence\"]:.1%}')
-        print(f'   Opportunité: {opportunity}')
-        "
-    
-    - name: 📧 Préparer notification (simulé)
-      if: success()
-      run: |
-        echo "📧 Notification email préparée"
-        echo "Si c'était réel, un email serait envoyé aux traders"
-        echo "Opportunité détectée: $(cat opportunity.txt)"
-    
-    - name: 💾 Sauvegarder prédictions
-      uses: actions/upload-artifact@v3
-      with:
-        name: predictions-$(date +%Y%m%d)
-        path: |
-          storage/predictions/
-          opportunity.txt
-        retention-days: 7
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
 
-  # ======================
-  # ÉTAPE 5 : DÉPLOIEMENT
-  # ======================
-  deploy:
-    needs: 
-      - setup
-      - collect-data
-      - train-models
-      - make-predictions
-    if: needs.setup.outputs.should_run_deploy == 'true'
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: 📥 Checkout du code
-      uses: actions/checkout@v3
-    
-    - name: 🐋 Préparer pour Hugging Face
-      run: |
-        echo "Préparation du déploiement sur Hugging Face..."
-        
-        # Créer un dossier pour le Space
-        mkdir -p hf_space
-        
-        # Copier les fichiers essentiels
-        cp src/app.py hf_space/
-        cp requirements.txt hf_space/
-        
-        # Créer un Dockerfile simplifié
-        cat > hf_space/Dockerfile << 'EOF'
-        FROM python:3.9-slim
-        WORKDIR /app
-        COPY requirements.txt .
-        RUN pip install --no-cache-dir -r requirements.txt
-        COPY app.py .
-        EXPOSE 7860
-        CMD ["streamlit", "run", "app.py", "--server.port=7860", "--server.address=0.0.0.0"]
-        EOF
-        
-        # Créer README pour Hugging Face
-        cat > hf_space/README.md << 'EOF'
-        ---
-        title: Apple Stock Predictor
-        emoji: 📈
-        colorFrom: orange
-        colorTo: blue
-        sdk: docker
-        pinned: false
-        ---
-        
-        # 🍏 Apple Stock Price Predictor
-        
-        Application de prédiction des cours AAPL utilisant CNN et GRU.
-        
-        ## Fonctionnalités
-        - Prédiction sur 21 jours
-        - Visualisation interactive
-        - Comparaison CNN vs GRU
-        
-        Développé par Bea Elie - Master 2 IABD
-        EOF
-        
-        echo "✅ Fichiers préparés pour Hugging Face"
-    
-    - name: 🚀 Déployer sur Hugging Face Spaces
-      if: env.HF_TOKEN != ''
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: |
-        cd hf_space
-        
-        # Initialiser git
-        git init
-        git config user.email "github-actions@github.com"
-        git config user.name "GitHub Actions"
-        git add .
-        git commit -m "Deploy $(date '+%Y-%m-%d %H:%M:%S')"
-        
-        # Pousser vers Hugging Face
-        git push --force https://${{ github.actor }}:$HF_TOKEN@huggingface.co/spaces/${{ github.repository_owner }}/apple-stock-predictor main
-        
-        echo "✅ Déployé sur: https://huggingface.co/spaces/${{ github.repository_owner }}/apple-stock-predictor"
-    
-    - name: ℹ️ Message si pas de token HF
-      if: env.HF_TOKEN == ''
-      run: |
-        echo "⚠️ Pas de token Hugging Face configuré"
-        echo "Pour déployer, ajoutez HF_TOKEN dans les secrets GitHub"
-        echo "Settings → Secrets and variables → Actions → New repository secret"
+      - name: Download stock data
+        run: |
+          python src/ingestion.py
 
-  # ======================
-  # ÉTAPE 6 : RAPPORT FINAL
-  # ======================
-  report:
-    needs: [collect-data, train-models, make-predictions, deploy]
-    if: always()
+      - name: Upload raw data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-data
+          path: data/raw/
+
+# ==========================
+# 2️⃣ PRÉTRAITEMENT
+# ==========================
+  preprocessing:
     runs-on: ubuntu-latest
-    
+    needs: data_collection
+
     steps:
-    - name: 📊 Générer rapport d'exécution
-      run: |
-        echo "========================================="
-        echo "        RAPPORT D'EXÉCUTION CI/CD        "
-        echo "========================================="
-        echo "Date: $(date)"
-        echo "Repository: ${{ github.repository }}"
-        echo "Workflow: ${{ github.workflow }}"
-        echo "Run ID: ${{ github.run_id }}"
-        echo ""
-        echo "📋 ÉTAPES EXÉCUTÉES:"
-        echo "  ✅ Collecte données: ${{ needs.collect-data.result }}"
-        echo "  ✅ Entraînement modèles: ${{ needs.train-models.result }}"
-        echo "  ✅ Prédictions: ${{ needs.make-predictions.result }}"
-        echo "  ✅ Déploiement: ${{ needs.deploy.result }}"
-        echo ""
-        echo "🔗 LIENS UTILES:"
-        echo "  - Actions: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        
-        if [[ "${{ needs.deploy.result }}" == "success" ]]; then
-          echo "  - Application: https://huggingface.co/spaces/${{ github.repository_owner }}/apple-stock-predictor"
-        fi
-        
-        echo "========================================="
-    
-    - name: 📤 Télécharger tous les artefacts
-      if: always()
-      uses: actions/download-artifact@v3
-      with:
-        path: artifacts/
-    
-    - name: 📦 Créer archive finale
-      if: always()
-      run: |
-        tar -czf pipeline_results_${{ github.run_id }}.tar.gz artifacts/
-        echo "📁 Archive créée: pipeline_results_${{ github.run_id }}.tar.gz"
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - run: pip install -r requirements.txt
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: raw-data
+          path: data/raw/
+
+      - name: Preprocess data
+        run: |
+          python src/preprocessing.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: processed-data
+          path: data/processed/
+
+# ==========================
+# 3️⃣ ENTRAÎNEMENT DES MODÈLES
+# ==========================
+  training:
+    runs-on: ubuntu-latest
+    needs: preprocessing
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - run: pip install -r requirements.txt
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: processed-data
+          path: data/processed/
+
+      - name: Train models (CNN & GRU)
+        run: |
+          python src/training.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trained-models
+          path: models/
+
+# ==========================
+# 4️⃣ ÉVALUATION & SÉLECTION
+# ==========================
+  evaluation:
+    runs-on: ubuntu-latest
+    needs: training
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - run: pip install -r requirements.txt
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: trained-models
+          path: models/
+
+      - name: Evaluate and select best model
+        run: |
+          python src/evaluation.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: best-model
+          path: models/best_model.h5
+
+# ==========================
+# 5️⃣ DÉPLOIEMENT HUGGING FACE
+# ==========================
+  deploy_huggingface:
+    runs-on: ubuntu-latest
+    needs: evaluation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Git
+        run: |
+          git config --global user.email "ci@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: best-model
+          path: models/
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git clone https://huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE_NAME}
+          cp -r app/* ${HF_SPACE_NAME}/
+          cp models/best_model.h5 ${HF_SPACE_NAME}/models/
+          cd ${HF_SPACE_NAME}
+          git add .
+          git commit -m "Automated deployment from GitHub Actions"
+          git push https://${HF_USERNAME}:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE_NAME}
+
+# ==========================
+# 6️⃣ PRÉDICTION & ALERTES
+# ==========================
+  prediction_and_alert:
+    runs-on: ubuntu-latest
+    needs: deploy_huggingface
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - run: pip install -r requirements.txt
+
+      - name: Run future prediction
+        run: |
+          python src/prediction.py
+
+      - name: Send email alerts
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        run: |
+          python src/notification.py
