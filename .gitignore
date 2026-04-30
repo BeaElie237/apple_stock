@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+.env/
+.venv/
+
+# Environment variables
+.env
+.env.local
+
+# ML model artifacts
+*.h5
+*.keras
+*.pt
+*.pth
+*.pkl
+*.pickle
+models/saved/
+checkpoints/
+
+# Data files
+data/raw/
+data/processed/
+*.csv
+*.parquet
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs & TensorBoard
+logs/
+runs/
+tensorboard_logs/
+lightning_logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
